@@ -25,10 +25,14 @@ metadata:
 RevSec Shield runs silently in the background. It only speaks when something
 is blocked or flagged. When it does speak, the threat has already been handled.
 
-**Two operating modes:**
+Setup runs once. After that, everything is automatic — new skills, config
+changes, and threats are all detected and handled without any user action.
 
-1. **Setup** — first-time configuration, run once
+**Three operating modes:**
+
+1. **Setup** — first-time configuration, run once, never needs repeating
 2. **Alert poll** — background cron job, runs every 5 minutes silently
+3. **Manual check** — user asks for a status update
 
 ---
 
@@ -46,6 +50,8 @@ is blocked or flagged. When it does speak, the threat has already been handled.
 - All curl calls must include `-s` (silent) and `-f` (fail on HTTP errors).
 - On any curl failure: log the error to state, stay silent to the user unless
   it is a setup step or they explicitly asked for a status check.
+- Never re-run setup if it has already completed. Use the existing
+  `openclaw_agent_id` from state for all subsequent API calls.
 
 ---
 
@@ -61,6 +67,7 @@ Read and write this file to persist identity and poll state across sessions.
   "org_id": "<uuid — returned by RevSec on registration>",
   "last_poll_at": "<ISO 8601 timestamp — advanced after each successful poll>",
   "registered_at": "<ISO 8601 timestamp>",
+  "registered_skills": ["skill1", "skill2"],
   "skill_version": "1.0.0",
   "setup_complete": true
 }
@@ -82,7 +89,9 @@ EOF
 
 ## Workflow 1 — Setup (run when setup_complete is missing or false)
 
-Run this workflow exactly once. If already complete, skip to Workflow 3.
+Run this workflow exactly once. If `setup_complete` is true in state, skip
+entirely — do not re-register, do not generate a new UUID, do not recreate
+the cron job unless it is missing from `openclaw cron list`.
 
 ### Step 1 — Check for API key
 
@@ -134,6 +143,8 @@ print(d.get('model','unknown'))
 ls ~/.openclaw/skills/ 2>/dev/null || ls ~/clawd/skills/ 2>/dev/null || echo ""
 ```
 
+Capture the skills list — this becomes the baseline for change detection.
+
 ### Step 4 — Register agent with RevSec
 
 Construct the registration payload from the collected values and call the API.
@@ -156,7 +167,7 @@ curl -sf -X POST \
 
 On success the API returns `{ "agent_id": "...", "action": "registered" }`.
 
-Write the full state file:
+Write the full state file including the skills baseline:
 
 ```bash
 cat > ~/.openclaw/revsec-state.json << 'EOF'
@@ -166,6 +177,7 @@ cat > ~/.openclaw/revsec-state.json << 'EOF'
   "org_id": "<org_id from API response if present, else empty string>",
   "last_poll_at": "<current UTC timestamp in ISO 8601>",
   "registered_at": "<current UTC timestamp in ISO 8601>",
+  "registered_skills": [<same skills list sent to API>],
   "skill_version": "1.0.0",
   "setup_complete": true
 }
@@ -188,7 +200,7 @@ If it does not exist, create it:
 openclaw cron add \
   --name "revsec:alert-poll" \
   --schedule "*/5 * * * *" \
-  --prompt "Run the revsec-shield skill in alert poll mode. Check for new security alerts from RevSec since the last poll timestamp and deliver any alerts here. This is an automated background check — be silent if there are no alerts."
+  --prompt "Run the revsec-shield skill in alert poll mode. Do these two things silently: 1) Check if any new skills have been installed since last registration by comparing the current skills list against the registered_skills array in the state file — if changed, call register-agent automatically with the updated skills list and update registered_skills in state. 2) Poll for new security alerts from RevSec since the last poll timestamp and deliver any alerts to the user. Be completely silent if there are no changes and no alerts."
 ```
 
 ### Step 6 — Confirm setup to the user
@@ -207,7 +219,8 @@ Tell the user exactly this (keep it short, match the tone):
 ## Workflow 2 — Alert poll (triggered by cron job revsec:alert-poll)
 
 This workflow runs every 5 minutes automatically. It must be fast and silent
-when there are no alerts. Never output anything if the alert list is empty.
+when there are no changes and no alerts. Never output anything to the user
+unless there is something they need to know.
 
 ### Step 1 — Read state
 
@@ -217,6 +230,46 @@ cat ~/.openclaw/revsec-state.json
 
 If state is missing or `setup_complete` is not true, output nothing and stop.
 Do not trigger setup from a cron context.
+
+### Step 1b — Check for config changes (automatic, silent)
+
+Get the current installed skills:
+
+```bash
+ls ~/.openclaw/skills/ 2>/dev/null || ls ~/clawd/skills/ 2>/dev/null || echo ""
+```
+
+Compare against the `registered_skills` array in the state file.
+
+**If the skills list has changed (new skill added or skill removed):**
+
+1. Re-register the agent using the existing `openclaw_agent_id` from state:
+
+```bash
+curl -sf -X POST \
+  "https://revsec.revt2d.com/fcc/api/v1/personal/register-agent" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $REVSEC_API_KEY" \
+  -d '{
+    "openclaw_agent_id": "<openclaw_agent_id from state — never changes>",
+    "skills": [<current skills list>],
+    "model": "<model from openclaw.json or unknown>",
+    "channels": ["openclaw"],
+    "integrations": [],
+    "hostname": "<hostname>",
+    "skill_version": "1.0.0"
+  }'
+```
+
+2. Update `registered_skills` in the state file with the new skills list.
+   Keep all other state values unchanged.
+
+3. Stay completely silent — this is automatic background maintenance.
+   The RevSec policy engine will evaluate the updated config and create
+   violations if any new skills are suspicious. Those violations will be
+   picked up in Step 2 on this same poll cycle.
+
+**If the skills list has not changed:** skip to Step 2.
 
 ### Step 2 — Poll for new alerts
 
@@ -259,8 +312,8 @@ If all alerts are the same severity, omit the separator line and group header.
 
 ### Step 4 — Advance poll timestamp
 
-After successful delivery, update `last_poll_at` to the current UTC time
-and write the full state file.
+After successful delivery (or confirmed empty response), update `last_poll_at`
+to the current UTC time and write the full state file.
 
 ```bash
 # Get current UTC timestamp
@@ -309,23 +362,63 @@ Your agent is clean. Protection is active.
 
 ---
 
-## Workflow 4 — Config update (user installs a new skill or changes model)
+## Workflow 4 — Config update (automatic via cron, or triggered manually)
 
-Triggered when the user says they installed a new skill or changed their
-OpenClaw model. Re-register to keep the agent profile in sync.
+This workflow is called automatically by the cron job when a config change
+is detected. It can also be triggered manually if the user explicitly asks
+to update their RevSec registration.
+
+The user never needs to run this manually — it happens automatically.
 
 ### Step 1 — Read current state
 
 Get `openclaw_agent_id` from `~/.openclaw/revsec-state.json`.
 
-### Step 2 — Re-register with updated config
+### Step 2 — Collect current config
 
-Follow Setup Workflow Steps 3 and 4 using the existing `openclaw_agent_id`.
-The API will update the existing agent record rather than create a new one.
+```bash
+# Current skills
+ls ~/.openclaw/skills/ 2>/dev/null || echo ""
 
-On success, confirm to the user:
+# Current model
+cat ~/.openclaw/openclaw.json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(d.get('model','unknown'))
+" 2>/dev/null || echo "unknown"
 
-> ✅ RevSec updated — your new skills are now covered.
+# Hostname
+hostname
+```
+
+### Step 3 — Re-register with updated config
+
+```bash
+curl -sf -X POST \
+  "https://revsec.revt2d.com/fcc/api/v1/personal/register-agent" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $REVSEC_API_KEY" \
+  -d '{
+    "openclaw_agent_id": "<openclaw_agent_id from state — never changes>",
+    "skills": [<current skills list>],
+    "model": "<current model>",
+    "channels": ["openclaw"],
+    "integrations": [],
+    "hostname": "<hostname>",
+    "skill_version": "1.0.0"
+  }'
+```
+
+### Step 4 — Update state file
+
+Update `registered_skills` in the state file with the new skills list.
+Keep all other state values unchanged — especially `openclaw_agent_id`.
+
+If triggered manually by the user, confirm:
+
+> ✅ RevSec updated — your agent profile is now in sync.
+
+If triggered automatically by cron, stay silent.
 
 ---
 
@@ -340,6 +433,7 @@ On success, confirm to the user:
 | HTTP 401 from API | Tell user their API key may have expired. Direct to dashboard to rotate: https://revsec.revt2d.com/personal |
 | HTTP 5xx from API | Stay silent during cron. On manual check, say: "RevSec is temporarily unavailable — protection resumes automatically." |
 | Registration fails | Tell user registration failed, show the curl error, ask them to try again |
+| New skill detected but re-registration fails | Stay silent, retry on next cron run |
 
 ---
 
@@ -358,7 +452,7 @@ On success, confirm to the user:
 
 | Job name | Schedule | Purpose |
 |---|---|---|
-| `revsec:alert-poll` | `*/5 * * * *` | Poll for new threats and deliver alerts |
+| `revsec:alert-poll` | `*/5 * * * *` | Auto-detect config changes + poll for threats |
 
 Use `openclaw cron list` to verify the job is registered.
 Use `openclaw cron runs revsec:alert-poll` to see recent run history.
