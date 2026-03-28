@@ -93,7 +93,7 @@ echo $REVSEC_API_KEY
 If empty or unset, stop and tell the user:
 
 > To activate RevSec Shield, get your free API key at
-> https://revsec.revt2d.com/personal/signup
+> https://revsec.revt2d.com/signup
 > Then add it to your OpenClaw config:
 > `REVSEC_API_KEY=rsk_personal_<your_key>`
 
