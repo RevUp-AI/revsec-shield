@@ -213,6 +213,11 @@ Tell the user exactly this (keep it short, match the tone):
 > is blocked. You won't hear from me unless something happens.
 >
 > Your dashboard: https://revsec.revt2d.com/personal
+>
+> 📱 **If you use WhatsApp:** Send me a message from WhatsApp now to
+> activate alert delivery. Without this first message, I can't reach
+> you on WhatsApp when threats are detected. Just say "Hi" from the
+> number you connected during setup.
 
 ---
 
