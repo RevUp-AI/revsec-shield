@@ -8,6 +8,7 @@ description: >
   or when running setup for the first time. Also handles the 5-minute background
   security poll (cron job revsec:alert-poll).
 homepage: https://revsec.revt2d.com
+privacy: https://revsec.revt2d.com/privacy
 metadata:
   {
     "openclaw":
@@ -33,6 +34,7 @@ delivered to your WhatsApp in plain English.
   hear from it when something needs your attention.
 - **Requirements:** A free RevSec account (revsec.revt2d.com/signup), WhatsApp
   connected to OpenClaw, and a `REVSEC_API_KEY` environment variable.
+- **Publisher:** RevUp AI, Inc. — hello@revupai.com — revsec.revt2d.com
 
 RevSec Shield is a **monitoring and alerting** tool. It detects threats and
 puts them in front of you immediately. You stay in control of what happens next.
@@ -84,6 +86,29 @@ That's it. RevSec Shield will confirm activation and start monitoring immediatel
 | `REVSEC_API_KEY` | RevSec API authentication key | Yes | OpenClaw runtime environment |
 
 Set via OpenClaw's environment settings UI or `.env` file — never as a shell export.
+No other environment variables are read by this skill.
+
+---
+
+## Data collected and transmitted
+
+This skill transmits exactly the following fields to `revsec.revt2d.com` — nothing else:
+
+| Field | What it is | Why it's needed |
+|---|---|---|
+| `hostname` | Machine name (e.g. `Nehas-iMac.local`) | Identifies which device the agent runs on |
+| `skills` | List of skill directory names only | Detects new integrations |
+| `model` | OpenClaw model name from config | Tracks model changes |
+| `openclaw_agent_id` | Locally-generated UUID, never changes | Stable agent identity |
+
+**Never transmitted:** message content, conversation history, file contents,
+credential values, environment variables beyond presence-check of REVSEC_API_KEY,
+or any other config file contents beyond the model name field.
+
+**WhatsApp:** Alerts are delivered via OpenClaw's existing WhatsApp integration.
+RevSec does not have access to WhatsApp credentials, your phone number, or
+message content. RevSec sends alert text to OpenClaw; OpenClaw delivers it
+to your connected channel.
 
 ---
 
@@ -157,11 +182,12 @@ Only run Steps 1–6 if `setup_complete` is missing or false.
 
 ### Step 1 — Check for API key
 
+Check if the key is present without exposing its value:
 ```bash
-[ -n "$REVSEC_API_KEY" ] && echo "API key is set" || echo "API key not set — see setup instructions"
+[ -n "$REVSEC_API_KEY" ] && echo "✓ API key is set" || echo "✗ API key not set — see setup instructions"
 ```
 
-If empty or unset, stop and tell the user:
+If not set, stop and tell the user:
 
 > To activate RevSec Shield, get your free API key at
 > https://revsec.revt2d.com/signup
@@ -185,23 +211,24 @@ cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen
 
 Store this value. It will be written to state in Step 4.
 
-### Step 3 — Collect agent config from OpenClaw environment
+### Step 3 — Collect exactly three values from the local environment
 
-Gather what is available from the local environment. Do not ask the user
-questions that can be inferred.
+Collect ONLY: hostname, model name, and skill directory names.
+Do not read any other files or environment variables. Do not ask the user
+questions that can be inferred from these three values.
 
 ```bash
-# Hostname
+# 1. Hostname only — no other system info
 hostname
 
-# OpenClaw model currently configured (read from config)
+# 2. Model name from OpenClaw config — model field only
 cat ~/.openclaw/openclaw.json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 print(d.get('model','unknown'))
 " 2>/dev/null || echo "unknown"
 
-# Skills currently installed (list skill directories)
+# 3. Skill directory names only — not file contents
 ls ~/.openclaw/skills/ 2>/dev/null || ls ~/clawd/skills/ 2>/dev/null || echo ""
 ```
 
@@ -209,7 +236,7 @@ Capture the skills list — this becomes the baseline for change detection.
 
 ### Step 4 — Register agent with RevSec
 
-Construct the registration payload from the collected values and call the API.
+Send only the three collected values plus the generated UUID:
 
 ```bash
 curl -sf -X POST \
@@ -218,10 +245,10 @@ curl -sf -X POST \
   -H "Authorization: Bearer $REVSEC_API_KEY" \
   -d '{
     "openclaw_agent_id": "<uuid from Step 2>",
-    "skills": [<comma-separated list of installed skill names as strings>],
-    "model": "<model from Step 3>",
+    "skills": [<list of skill directory names as strings>],
+    "model": "<model name from Step 3>",
     "channels": ["openclaw"],
-    "integrations": [<any external services visible in openclaw.json>],
+    "integrations": [],
     "hostname": "<hostname from Step 3>",
     "skill_version": "1.0.0"
   }'
@@ -301,7 +328,7 @@ Do not trigger setup from a cron context.
 
 ### Step 1b — Check for config changes (automatic, silent)
 
-Get the current installed skills:
+Get current skill directory names only:
 
 ```bash
 ls ~/.openclaw/skills/ 2>/dev/null || ls ~/clawd/skills/ 2>/dev/null || echo ""
@@ -323,7 +350,7 @@ curl -sf -X POST \
   -H "Authorization: Bearer $REVSEC_API_KEY" \
   -d '{
     "openclaw_agent_id": "<openclaw_agent_id from state — never changes>",
-    "skills": [<current skills list>],
+    "skills": [<current skill directory names>],
     "model": "<model from openclaw.json or unknown>",
     "channels": ["openclaw"],
     "integrations": [],
@@ -361,21 +388,11 @@ If the response is an empty array `[]`: stay completely silent. Advance
 
 For each alert in the response, use the `message` field from the API response
 directly — it is already formatted for human delivery. Do not add your own
-headers or reformat it. Do not prepend "RevSec blocked a threat" — the
-message field already contains the full alert text.
+headers or reformat it.
 
 If there are multiple alerts, deliver them as a single message grouped by
 severity — critical first, then high, then medium. Use a separator line
 between groups only if there are multiple severity levels.
-
-Example output format:
-```
-<message field from API — critical alerts first>
-
-──────────────────────────
-
-<message field from API — medium/low alerts>
-```
 
 ### Step 4 — Advance poll timestamp
 
@@ -388,7 +405,7 @@ python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.
 
 ---
 
-## Workflow 3 — Manual security check (user asks "how am I protected?" or "what did RevSec detect?")
+## Workflow 3 — Manual security check
 
 ### Step 1 — Read state
 
@@ -417,8 +434,6 @@ curl -sf \
 
 ### Step 3 — Report to user
 
-Use the summary data to report in plain language. Follow this format exactly:
-
 ```
 🛡️ RevSec Shield — last 7 days
 
@@ -431,7 +446,7 @@ Policies active: <active_policies>
 Full details: https://revsec.revt2d.com/personal
 ```
 
-If `threats_blocked_7d` and `threats_flagged_7d` are both 0:
+If both counts are 0:
 
 ```
 🛡️ RevSec Shield — no threats detected in the last 7 days.
@@ -442,23 +457,19 @@ Your agent is clean. Protection is active.
 
 ## Workflow 4 — Config update (automatic via cron, or triggered manually)
 
-This workflow is called automatically by the cron job when a config change
-is detected. It can also be triggered manually if the user explicitly asks
-to update their RevSec registration.
-
 The user never needs to run this manually — it happens automatically.
 
 ### Step 1 — Read current state
 
 Get `openclaw_agent_id` from `~/.openclaw/revsec-state.json`.
 
-### Step 2 — Collect current config
+### Step 2 — Collect current config (three values only)
 
 ```bash
-# Current skills
+# Skill directory names only
 ls ~/.openclaw/skills/ 2>/dev/null || echo ""
 
-# Current model
+# Model name from config
 cat ~/.openclaw/openclaw.json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -478,7 +489,7 @@ curl -sf -X POST \
   -H "Authorization: Bearer $REVSEC_API_KEY" \
   -d '{
     "openclaw_agent_id": "<openclaw_agent_id from state — never changes>",
-    "skills": [<current skills list>],
+    "skills": [<current skill directory names>],
     "model": "<current model>",
     "channels": ["openclaw"],
     "integrations": [],
@@ -504,11 +515,17 @@ If triggered automatically by cron, stay silent.
 
 - **No message content sent:** RevSec only receives agent metadata — skill names,
   hostname, model. Your conversations and message content are never sent to RevSec.
-- **Exact data sent to revsec.revt2d.com:** Only these fields are transmitted:
-  hostname (machine name), list of installed skill names, OpenClaw model name,
-  and a locally-generated UUID that identifies your agent. Nothing else.
-  No file contents, no config values, no environment variables beyond confirming
-  REVSEC_API_KEY is set.
+- **Exact data sent to revsec.revt2d.com:** Only these four fields are transmitted:
+  hostname (machine name), list of installed skill directory names, OpenClaw model
+  name, and a locally-generated UUID. Nothing else. No file contents, no config
+  values, no environment variables beyond confirming REVSEC_API_KEY is set.
+- **API key handling:** Setup checks that REVSEC_API_KEY is present without echoing
+  its value. The key is only transmitted as a Bearer token in Authorization headers
+  to revsec.revt2d.com — never logged, never stored in the state file.
+- **WhatsApp delivery:** Alerts are delivered via OpenClaw's existing WhatsApp
+  integration. RevSec does not have access to WhatsApp credentials, your phone
+  number, or message content. RevSec sends alert text to OpenClaw; OpenClaw
+  delivers it to your connected channel.
 - **Credentials:** API key stored in OpenClaw runtime environment only.
   Never logged or transmitted beyond the RevSec API.
 - **Network access:** Only connects to `revsec.revt2d.com`. No other outbound
@@ -521,12 +538,12 @@ If triggered automatically by cron, stay silent.
   patterns are used anywhere in this skill.
 - **No credential harvesting:** This skill does not read environment variables
   beyond `REVSEC_API_KEY`, does not access credential files, and does not
-  transmit system information beyond hostname and skill names.
+  transmit system information beyond hostname and skill directory names.
 - **Read-only agent monitoring:** This skill never modifies OpenClaw settings,
   agent configuration, or installed skills.
-- **API key check:** Setup verifies REVSEC_API_KEY is set without echoing
-  its value. The key is only transmitted as a Bearer token in Authorization
-  headers to revsec.revt2d.com.
+- **Privacy policy:** https://revsec.revt2d.com/privacy — documents what data
+  is collected, retained, and how it is used.
+- **Company:** RevUp AI, Inc. Contact: hello@revupai.com
 
 ---
 
@@ -537,9 +554,9 @@ If triggered automatically by cron, stay silent.
 | `REVSEC_API_KEY` not set | Stop, prompt user to get key at signup URL |
 | State file missing during cron poll | Stay silent, stop |
 | curl timeout during cron poll | Stay silent, do not advance timestamp |
-| HTTP 429 from API | Stay silent, do not advance timestamp. On manual check, tell user: "You've hit the daily scan limit. Upgrade at https://revsec.revt2d.com/upgrade" |
-| HTTP 401 from API | Tell user their API key may have expired. Direct to dashboard to rotate: https://revsec.revt2d.com/personal |
-| HTTP 5xx from API | Stay silent during cron. On manual check, say: "RevSec is temporarily unavailable — protection resumes automatically." |
+| HTTP 429 from API | Stay silent during cron. On manual check: "You've hit the daily scan limit. Upgrade at https://revsec.revt2d.com/upgrade" |
+| HTTP 401 from API | Tell user their API key may have expired. Direct to: https://revsec.revt2d.com/personal |
+| HTTP 5xx from API | Stay silent during cron. On manual check: "RevSec is temporarily unavailable — protection resumes automatically." |
 | Registration fails | Tell user registration failed, show the curl error, ask them to try again |
 | New skill detected but re-registration fails | Stay silent, retry on next cron run |
 | Cron job missing | Recreate silently during next manual check (Workflow 3 Step 1b) |
@@ -564,12 +581,13 @@ If triggered automatically by cron, stay silent.
 ## What RevSec Shield does NOT do
 
 - It does not change any OpenClaw settings or configuration
-- It does not access any data beyond what the agent config exposes
+- It does not access any data beyond skill directory names, hostname, and model name
 - It does not store any data locally beyond `~/.openclaw/revsec-state.json`
 - It does not send prompts or conversation content to RevSec — only metadata
 - It does not block or modify LLM calls directly — it monitors agent
   configuration and behaviour via the RevSec API
 - It does not initiate WhatsApp sessions — user must send first message
+- It does not read credential files or access environment variables beyond REVSEC_API_KEY
 
 ---
 
@@ -586,6 +604,17 @@ Use `openclaw cron runs revsec:alert-poll` to see recent run history.
 
 ## Release notes
 
+**v1.0.2** — Security transparency update
+- Added explicit data transmission table showing exactly what is sent to API
+- API key check no longer echoes key value
+- Narrowed Step 3 language to specify exactly three collected values
+- Added WhatsApp clarification — RevSec does not access WhatsApp credentials
+- Added privacy policy link and company identity
+- Added "What RevSec Shield does NOT do" section
+
+**v1.0.1** — Patch
+- Improved Security & Guardrails section
+
 **v1.0.0** — Initial public release
 - Agent registration and monitoring
 - 5-minute background polling
@@ -600,6 +629,7 @@ Use `openclaw cron runs revsec:alert-poll` to see recent run history.
 
 - Dashboard: https://revsec.revt2d.com/personal
 - Free signup: https://revsec.revt2d.com/signup
+- Privacy policy: https://revsec.revt2d.com/privacy
 - Team plan: https://revsec.revt2d.com/signup/team
 - Support: hello@revupai.com
 
@@ -608,6 +638,7 @@ Use `openclaw cron runs revsec:alert-poll` to see recent run history.
 ## Publisher
 
 - **Publisher:** @RevUp-AI
+- **Company:** RevUp AI, Inc.
 - **Homepage:** https://revsec.revt2d.com
 - **Support:** hello@revupai.com
 - **GitHub:** https://github.com/RevUp-AI/revsec-shield
