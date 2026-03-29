@@ -1,11 +1,12 @@
 ---
 name: revsec-shield
 description: >
-  24/7 security protection for your OpenClaw agent. Detects and blocks prompt
-  injection attacks, malicious skills, and data exfiltration attempts in real
-  time. Use when the user asks about agent security, wants to check for threats,
-  asks what RevSec blocked, or when running setup for the first time.
-  Also handles the 5-minute background security poll (cron job revsec:alert-poll).
+  24/7 security monitoring for your OpenClaw agent. Detects prompt injection
+  attacks, malicious skills, and data exfiltration attempts. Delivers plain-English
+  alerts to your WhatsApp when something suspicious is detected. Use when the user
+  asks about agent security, wants to check for threats, asks what RevSec detected,
+  or when running setup for the first time. Also handles the 5-minute background
+  security poll (cron job revsec:alert-poll).
 homepage: https://revsec.revt2d.com
 metadata:
   {
@@ -20,13 +21,21 @@ metadata:
 
 # RevSec Shield
 
+One-line description: 24/7 security monitoring for your OpenClaw agent —
+delivered to your WhatsApp in plain English.
+
 ## Overview
 
-RevSec Shield runs silently in the background. It only speaks when something
-is blocked or flagged. When it does speak, the threat has already been handled.
+- **What it does:** Monitors your OpenClaw agent for prompt injection attacks,
+  malicious skills, and unexpected configuration changes. Sends WhatsApp alerts
+  when something suspicious is detected.
+- **When to use it:** Install once. It runs silently in the background. You only
+  hear from it when something needs your attention.
+- **Requirements:** A free RevSec account (revsec.revt2d.com/signup), WhatsApp
+  connected to OpenClaw, and a `REVSEC_API_KEY` environment variable.
 
-Setup runs once. After that, everything is automatic — new skills, config
-changes, and threats are all detected and handled without any user action.
+RevSec Shield is a **monitoring and alerting** tool. It detects threats and
+puts them in front of you immediately. You stay in control of what happens next.
 
 **Three operating modes:**
 
@@ -36,11 +45,53 @@ changes, and threats are all detected and handled without any user action.
 
 ---
 
+## Quick Start
+
+### Install
+Ask your OpenClaw agent:
+```
+Use clawhub to install revsec-shield
+```
+
+Or via CLI:
+```bash
+npm i -g clawhub
+clawhub install revsec-shield
+```
+
+### Configure
+Add your API key in OpenClaw's environment settings (not shell exports):
+```
+REVSEC_API_KEY=rsk_personal_<your_key>
+```
+
+Get your free key at: https://revsec.revt2d.com/signup
+
+### Activate
+Ask your OpenClaw agent:
+```
+Run the revsec-shield setup
+```
+
+That's it. RevSec Shield will confirm activation and start monitoring immediately.
+
+---
+
+## Environment Variable Contract
+
+| Variable | Purpose | Required | Where to set |
+|---|---|---|---|
+| `REVSEC_API_KEY` | RevSec API authentication key | Yes | OpenClaw runtime environment |
+
+Set via OpenClaw's environment settings UI or `.env` file — never as a shell export.
+
+---
+
 ## Core rules (always follow)
 
 - Never ask the user to do something manually that can be done via curl or shell.
-- RevSec acts first, reports second. Never ask the user "should I block this?" —
-  report what was already blocked.
+- RevSec detects first, reports second. Never ask the user "should I flag this?" —
+  report what was already detected.
 - Keep alert messages plain and human. No JSON, no confidence scores, no
   technical jargon unless the user asks for detail.
 - State file is `~/.openclaw/revsec-state.json`. Read before every action.
@@ -89,9 +140,20 @@ EOF
 
 ## Workflow 1 — Setup (run when setup_complete is missing or false)
 
-Run this workflow exactly once. If `setup_complete` is true in state, skip
-entirely — do not re-register, do not generate a new UUID, do not recreate
-the cron job unless it is missing from `openclaw cron list`.
+**BEFORE ANYTHING ELSE — Check if already set up:**
+
+Read state file:
+```bash
+cat ~/.openclaw/revsec-state.json 2>/dev/null || echo "{}"
+```
+
+If `setup_complete` is `true`:
+1. Check if cron job exists: `openclaw cron list`
+2. If `revsec:alert-poll` is missing → create it (Step 5 only)
+3. Tell user: "RevSec Shield is already active and protecting your agent."
+4. **STOP — do not proceed with Steps 1–4. Do not re-register.**
+
+Only run Steps 1–6 if `setup_complete` is missing or false.
 
 ### Step 1 — Check for API key
 
@@ -103,7 +165,7 @@ If empty or unset, stop and tell the user:
 
 > To activate RevSec Shield, get your free API key at
 > https://revsec.revt2d.com/signup
-> Then add it to your OpenClaw config:
+> Then add it to your OpenClaw environment settings:
 > `REVSEC_API_KEY=rsk_personal_<your_key>`
 
 Do not proceed until the key is set.
@@ -199,6 +261,7 @@ If it does not exist, create it:
 ```bash
 openclaw cron add \
   --name "revsec:alert-poll" \
+  --model "google/gemini-2.0-flash" \
   --schedule "*/5 * * * *" \
   --prompt "Run the revsec-shield skill in alert poll mode. Do these two things silently: 1) Check if any new skills have been installed since last registration by comparing the current skills list against the registered_skills array in the state file — if changed, call register-agent automatically with the updated skills list and update registered_skills in state. 2) Poll for new security alerts from RevSec since the last poll timestamp and deliver any alerts to the user. Be completely silent if there are no changes and no alerts."
 ```
@@ -210,12 +273,12 @@ Tell the user exactly this (keep it short, match the tone):
 > ✅ RevSec Shield is active. Your agent is registered and protected.
 >
 > I'll check for threats every 5 minutes and alert you here if anything
-> is blocked. You won't hear from me unless something happens.
+> is detected. You won't hear from me unless something happens.
 >
 > Your dashboard: https://revsec.revt2d.com/personal
 >
 > 📱 **If you use WhatsApp:** Send me a message from WhatsApp now to
-> activate alert delivery. Without this first message, I can't reach
+> activate alert delivery. Without this first message, I cannot reach
 > you on WhatsApp when threats are detected. Just say "Hi" from the
 > number you connected during setup.
 
@@ -244,7 +307,10 @@ Get the current installed skills:
 ls ~/.openclaw/skills/ 2>/dev/null || ls ~/clawd/skills/ 2>/dev/null || echo ""
 ```
 
-Compare against the `registered_skills` array in the state file.
+**If `registered_skills` is missing from state file:**
+Treat it as an empty list. All current skills are "new". Re-register once to
+set the baseline, then write `registered_skills` to state. Stay silent —
+this is a one-time migration for users upgrading from an older version.
 
 **If the skills list has changed (new skill added or skill removed):**
 
@@ -293,27 +359,23 @@ If the response is an empty array `[]`: stay completely silent. Advance
 
 ### Step 3 — Deliver alerts (only if response is non-empty)
 
-For each alert in the response, format and deliver to the user's channel.
-Use the `message` field from the API response directly — it is already
-formatted for human delivery. Do not reformat it.
+For each alert in the response, use the `message` field from the API response
+directly — it is already formatted for human delivery. Do not add your own
+headers or reformat it. Do not prepend "RevSec blocked a threat" — the
+message field already contains the full alert text.
 
 If there are multiple alerts, deliver them as a single message grouped by
-severity — critical first, then high, then medium.
+severity — critical first, then high, then medium. Use a separator line
+between groups only if there are multiple severity levels.
 
-Example output format (follow this exactly):
-
+Example output format:
 ```
-🔴 RevSec blocked a threat
-
-[message field from API response]
+<message field from API — critical alerts first>
 
 ──────────────────────────
-🟡 RevSec flagged activity for your review
 
-[message field from API response]
+<message field from API — medium/low alerts>
 ```
-
-If all alerts are the same severity, omit the separator line and group header.
 
 ### Step 4 — Advance poll timestamp
 
@@ -321,18 +383,29 @@ After successful delivery (or confirmed empty response), update `last_poll_at`
 to the current UTC time and write the full state file.
 
 ```bash
-# Get current UTC timestamp
 python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())"
 ```
 
 ---
 
-## Workflow 3 — Manual security check (user asks "how am I protected?" or "what did RevSec block?")
+## Workflow 3 — Manual security check (user asks "how am I protected?" or "what did RevSec detect?")
 
 ### Step 1 — Read state
 
 Check `~/.openclaw/revsec-state.json`. If setup is not complete, run
 Workflow 1 first.
+
+### Step 1b — Check cron health (self-healing)
+
+```bash
+openclaw cron list
+```
+
+If `revsec:alert-poll` is missing from the list — recreate it silently
+using Step 5 from Workflow 1, then tell the user:
+
+> Background monitoring was inactive — I've restarted it. Your protection
+> is now fully active again.
 
 ### Step 2 — Fetch dashboard summary
 
@@ -349,7 +422,7 @@ Use the summary data to report in plain language. Follow this format exactly:
 ```
 🛡️ RevSec Shield — last 7 days
 
-Threats blocked: <threats_blocked_7d>
+Threats detected: <threats_blocked_7d>
 Flagged for review: <threats_flagged_7d>
 Agent: <agent.name> (<agent.agent_framework>)
 Status: <agent.status>
@@ -361,7 +434,7 @@ Full details: https://revsec.revt2d.com/personal
 If `threats_blocked_7d` and `threats_flagged_7d` are both 0:
 
 ```
-🛡️ RevSec Shield — no threats in the last 7 days.
+🛡️ RevSec Shield — no threats detected in the last 7 days.
 Your agent is clean. Protection is active.
 ```
 
@@ -427,6 +500,28 @@ If triggered automatically by cron, stay silent.
 
 ---
 
+## Security & Guardrails
+
+- **No message content sent:** RevSec only receives agent metadata — skill names,
+  hostname, model. Your conversations and message content are never sent to RevSec.
+- **Credentials:** API key stored in OpenClaw runtime environment only.
+  Never logged or transmitted beyond the RevSec API.
+- **Network access:** Only connects to `revsec.revt2d.com`. No other outbound
+  connections are made by this skill.
+- **Local storage:** State stored only in `~/.openclaw/revsec-state.json`.
+  No other local files are created or modified.
+- **Fail-closed on API errors:** If RevSec API is unreachable, skill stays
+  silent and retries on next poll. Agent behaviour is never modified.
+- **No pipe-to-interpreter:** No `curl | bash`, `curl | python`, or similar
+  patterns are used anywhere in this skill.
+- **No credential harvesting:** This skill does not read environment variables
+  beyond `REVSEC_API_KEY`, does not access credential files, and does not
+  transmit system information beyond hostname and skill names.
+- **Read-only agent monitoring:** This skill never modifies OpenClaw settings,
+  agent configuration, or installed skills.
+
+---
+
 ## Error handling
 
 | Situation | Action |
@@ -439,6 +534,22 @@ If triggered automatically by cron, stay silent.
 | HTTP 5xx from API | Stay silent during cron. On manual check, say: "RevSec is temporarily unavailable — protection resumes automatically." |
 | Registration fails | Tell user registration failed, show the curl error, ask them to try again |
 | New skill detected but re-registration fails | Stay silent, retry on next cron run |
+| Cron job missing | Recreate silently during next manual check (Workflow 3 Step 1b) |
+| WhatsApp alerts not arriving | Remind user to send first message from WhatsApp to establish session |
+
+---
+
+## Troubleshooting
+
+| Error | Fix |
+|---|---|
+| `No API key found` | Set `REVSEC_API_KEY` in OpenClaw environment settings |
+| `401 Unauthorized` | Check key starts with `rsk_personal_` and is complete (77 chars) |
+| `429 Agent limit` | Free tier supports 1 agent — upgrade at revsec.revt2d.com/upgrade |
+| Cron job errors | Ask agent: "Run the revsec-shield setup" to recreate cron job |
+| No WhatsApp alerts | Send a message to OpenClaw from WhatsApp first to establish session |
+| `registered_skills` missing | Cron will auto-fix on next run — no action needed |
+| Setup re-runs every time | Check state file has `"setup_complete": true` |
 
 ---
 
@@ -448,8 +559,9 @@ If triggered automatically by cron, stay silent.
 - It does not access any data beyond what the agent config exposes
 - It does not store any data locally beyond `~/.openclaw/revsec-state.json`
 - It does not send prompts or conversation content to RevSec — only metadata
-- It does not block or modify LLM calls directly — it monitors via the
-  agent activity that flows through the RevSec API
+- It does not block or modify LLM calls directly — it monitors agent
+  configuration and behaviour via the RevSec API
+- It does not initiate WhatsApp sessions — user must send first message
 
 ---
 
@@ -461,3 +573,33 @@ If triggered automatically by cron, stay silent.
 
 Use `openclaw cron list` to verify the job is registered.
 Use `openclaw cron runs revsec:alert-poll` to see recent run history.
+
+---
+
+## Release notes
+
+**v1.0.0** — Initial public release
+- Agent registration and monitoring
+- 5-minute background polling
+- WhatsApp alert delivery
+- Automatic config change detection
+- New integration alerts
+- Personal security dashboard at revsec.revt2d.com/personal
+
+---
+
+## Links
+
+- Dashboard: https://revsec.revt2d.com/personal
+- Free signup: https://revsec.revt2d.com/signup
+- Team plan: https://revsec.revt2d.com/signup/team
+- Support: hello@revupai.com
+
+---
+
+## Publisher
+
+- **Publisher:** @RevUp-AI
+- **Homepage:** https://revsec.revt2d.com
+- **Support:** hello@revupai.com
+- **GitHub:** https://github.com/RevUp-AI/revsec-shield
