@@ -158,7 +158,7 @@ Only run Steps 1–6 if `setup_complete` is missing or false.
 ### Step 1 — Check for API key
 
 ```bash
-echo $REVSEC_API_KEY
+[ -n "$REVSEC_API_KEY" ] && echo "API key is set" || echo "API key not set — see setup instructions"
 ```
 
 If empty or unset, stop and tell the user:
@@ -504,6 +504,11 @@ If triggered automatically by cron, stay silent.
 
 - **No message content sent:** RevSec only receives agent metadata — skill names,
   hostname, model. Your conversations and message content are never sent to RevSec.
+- **Exact data sent to revsec.revt2d.com:** Only these fields are transmitted:
+  hostname (machine name), list of installed skill names, OpenClaw model name,
+  and a locally-generated UUID that identifies your agent. Nothing else.
+  No file contents, no config values, no environment variables beyond confirming
+  REVSEC_API_KEY is set.
 - **Credentials:** API key stored in OpenClaw runtime environment only.
   Never logged or transmitted beyond the RevSec API.
 - **Network access:** Only connects to `revsec.revt2d.com`. No other outbound
@@ -519,6 +524,9 @@ If triggered automatically by cron, stay silent.
   transmit system information beyond hostname and skill names.
 - **Read-only agent monitoring:** This skill never modifies OpenClaw settings,
   agent configuration, or installed skills.
+- **API key check:** Setup verifies REVSEC_API_KEY is set without echoing
+  its value. The key is only transmitted as a Bearer token in Authorization
+  headers to revsec.revt2d.com.
 
 ---
 
